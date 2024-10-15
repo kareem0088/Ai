@@ -1,0 +1,68 @@
+# استيراد المكتبات اللازمة
+import pandas as pd
+import lightgbm as lgb
+import MetaTrader5 as mt5
+import pandas_ta as ta
+import numpy as np
+
+# تحميل النموذج المدرب
+model = lgb.Booster(model_file=r'C:\Users\Access\Downloads\lightgbm_model.txt')
+
+# معلومات تسجيل الدخول
+account_number = 51915724  # رقم الحساب
+password = "yqWAA@pt37$V1W"  # كلمة المرور
+server = "ICMarketsSC-Demo"  # اسم الخادم
+
+# تهيئة الاتصال بـ MetaTrader 5
+if not mt5.initialize(login=account_number, password=password, server=server):
+    print("Failed to initialize MT5")
+    mt5.shutdown()
+
+# تحديد الرمز الزمني والفترة الزمنية
+symbol = "EURUSD"  # على سبيل المثال
+timeframe = mt5.TIMEFRAME_M1  # دقيقة واحدة
+num_bars = 100  # عدد الشموع المطلوبة لحساب المؤشرات
+
+# الحصول على البيانات من MT5
+rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, num_bars)
+
+# التأكد من إغلاق الاتصال بـ MetaTrader 5
+mt5.shutdown()
+
+# تحويل البيانات إلى DataFrame
+if rates is None or len(rates) == 0:
+    print("No data received from MT5")
+else:
+    rates_df = pd.DataFrame(rates)
+
+    # حساب المؤشرات الفنية باستخدام pandas-ta
+    rates_df['EMA_100'] = ta.ema(rates_df['close'], length=100)
+    rates_df['EMA_50'] = ta.ema(rates_df['close'], length=50)
+    rates_df['EMA_21'] = ta.ema(rates_df['close'], length=21)
+    rates_df['EMA_13'] = ta.ema(rates_df['close'], length=13)
+    rates_df['EMA_7'] = ta.ema(rates_df['close'], length=7)
+    rates_df['RSI_10'] = ta.rsi(rates_df['close'], length=10)
+    rates_df['ATR_10'] = ta.atr(rates_df['high'], rates_df['low'], rates_df['close'], length=10)
+    rates_df['ATR_30'] = ta.atr(rates_df['high'], rates_df['low'], rates_df['close'], length=30)
+
+    # اختيار آخر صف للمدخلات
+    input_data = rates_df.iloc[-1][['open', 'high', 'low', 'close', 'tick_volume',
+                                    'EMA_100', 'EMA_50', 'EMA_21', 'EMA_13', 'EMA_7',
+                                    'RSI_10', 'ATR_10', 'ATR_30']]
+
+    # تحويل المدخلات إلى DataFrame
+    input_df = pd.DataFrame([input_data])
+
+    # التأكد من ترتيب الأعمدة كما في التدريب
+    features = ['open', 'high', 'low', 'close', 'tick_volume',
+                'EMA_100', 'EMA_50', 'EMA_21', 'EMA_13', 'EMA_7',
+                'RSI_10', 'ATR_10', 'ATR_30']
+
+    # ترتيب الأعمدة كما في التدريب
+    input_df = input_df[features]
+
+    # التنبؤ باستخدام النموذج
+    prediction = model.predict(input_df)
+
+    # عرض النتيجة
+    print(f'التنبؤ: {prediction[0]}')

@@ -1,0 +1,255 @@
+# استيراد المكتبات اللازمة
+import pandas as pd
+import lightgbm as lgb
+import MetaTrader5 as mt5
+import pandas_ta as ta
+import numpy as np
+import pyfiglet as pf
+from datetime import datetime
+import time
+import os
+import sys
+import colorama
+from colorama import Fore, Back, Style
+
+# تفعيل colorama للعمل على أنظمة Windows
+colorama.init()
+
+# دالة لتحويل وقت Unix إلى وقت مقروء
+def unix_to_datetime(unix_time):
+    return datetime.fromtimestamp(unix_time).strftime('%Y-%m-%d %H:%M:%S')
+
+# دالة لمسح الشاشة باستخدام sys.stdout.write
+def clear_screen():
+    sys.stdout.write("\033[H\033[J")  # مسح الشاشة باستخدام ANSI
+
+# دالة لحساب الربح الصافي للصفقات المفتوحة
+def calculate_open_net_profit(positions):
+    open_net_profit = 0.0
+    for position in positions:
+        profit = position.profit
+        swap = position.swap if hasattr(position, 'swap') else 0.0
+        commission = position.commission if hasattr(position, 'commission') else 0.0
+        open_net_profit += profit - swap - commission
+    return open_net_profit
+
+# دالة لمراقبة الصفقات المفتوحة وفتح صفقات جديدة عند عدم وجود صفقات
+def monitor_trades(max_trades):
+    while True:
+        clear_screen()  # مسح الشاشة قبل الطباعة الجديدة
+
+        positions = mt5.positions_get()
+        num_open_trades = len(positions)
+
+        if num_open_trades > 0:
+            # حساب الربح الصافي باستخدام دالة calculate_open_net_profit
+            open_net_profit = calculate_open_net_profit(positions)
+            print(textArt)
+            print("\n# Open Positions ")
+            print("-" * 49)
+
+            # التأكد من الرمز والحصول على أسعار العرض والطلب
+            symbol = positions[0].symbol  # استخدام رمز الصفقة الأولى للحصول على بيانات
+            tick_ = mt5.symbol_info_tick(symbol)
+            if tick_:
+                print(f"| Ask: {tick_.ask:.5f} | Bid: {tick_.bid:.5f} | Spread: {tick_.ask - tick_.bid:.5f} |")
+
+            print("-" * 112)
+            print(f"| {'Symbol':<6} | {'Ticket':<10} | {'Vol':<5} | {'Type':<5} | {'Open Price':<10} | "
+                  f"{'Stop Loss':<11} | {'Take Profit':<11} | {'Profit':<6} |  "
+                  f"{'Open Time':<20}|")
+            print("-" * 112)
+
+            for position in positions:
+                print(f"| {position.symbol:<6} | {position.ticket:<10} | {position.volume:<5} | "
+                      f"{'Buy' if position.type == 0 else 'Sell':<5} | {position.price_open:<10.5f} | "
+                      f"{position.sl:<11.5f} | {position.tp:<11.5f} | {position.profit:<6} | "
+                      f"{unix_to_datetime(position.time):<20} |")
+            print("-" * 112)
+
+            # الحصول على معلومات الحساب وعرضها فقط عند وجود صفقات مفتوحة
+            account_info = mt5.account_info()
+            if account_info is not None:
+                margin_level = (account_info.equity / account_info.margin) * 100 if account_info.margin != 0 else 0
+                print(Back.RED + f"| Balance: {account_info.balance:.2f}$ | Equity: {account_info.equity:.2f}$ | "
+                      f"Margin: {account_info.margin:.2f}$ | Free Margin: {account_info.margin_free:.2f}$ | "
+                      f"Margin Level: {margin_level:.2f}% | Profit: {open_net_profit:.2f}$ |" + Back.RESET)
+                print('-'*112)
+            else:
+                print(Back.RED +"[!] Failed to retrieve account info."+ Back.RESET)
+
+        if num_open_trades < max_trades:
+            # محاولة فتح صفقة جديدة عند عدم تجاوز الحد الأقصى للصفقات المفتوحة
+            open_new_trade()
+
+        # الانتظار لعدد معين من الثواني قبل التحديث
+        time.sleep(1)
+
+# دالة لفتح صفقة جديدة
+def open_new_trade():
+    # الحصول على البيانات من MT5
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, num_bars)
+
+    # تحويل البيانات إلى DataFrame
+    if rates is None or len(rates) == 0:
+        print(Back.RED +"[!] no data from mt5."+ Back.RESET)
+        return
+
+    rates_df = pd.DataFrame(rates)
+
+    # حساب المؤشرات الفنية باستخدام pandas-ta
+    rates_df['EMA_100'] = ta.ema(rates_df['close'], length=100)
+    rates_df['EMA_50'] = ta.ema(rates_df['close'], length=50)
+    rates_df['EMA_21'] = ta.ema(rates_df['close'], length=21)
+    rates_df['EMA_13'] = ta.ema(rates_df['close'], length=13)
+    rates_df['EMA_7'] = ta.ema(rates_df['close'], length=7)
+    rates_df['RSI_10'] = ta.rsi(rates_df['close'], length=10)
+    rates_df['ATR_10'] = ta.atr(rates_df['high'], rates_df['low'], rates_df['close'], length=10)
+    rates_df['ATR_30'] = ta.atr(rates_df['high'], rates_df['low'], rates_df['close'], length=30)
+
+    # اختيار آخر صف للمدخلات
+    input_data = rates_df.iloc[-1][['open', 'high', 'low', 'close', 'tick_volume',
+                                    'EMA_100', 'EMA_50', 'EMA_21', 'EMA_13', 'EMA_7',
+                                    'RSI_10', 'ATR_10', 'ATR_30']]
+
+    # تحويل المدخلات إلى DataFrame
+    input_df = pd.DataFrame([input_data])
+
+    # التأكد من ترتيب الأعمدة كما في التدريب
+    features = ['open', 'high', 'low', 'close', 'tick_volume',
+                'EMA_100', 'EMA_50', 'EMA_21', 'EMA_13', 'EMA_7',
+                'RSI_10', 'ATR_10', 'ATR_30']
+
+    # ترتيب الأعمدة كما في التدريب
+    input_df = input_df[features]
+
+    # فرضاً أن prediction_ هو مصفوفة NumPy تحتوي على قيمة واحدة
+    prediction_ = model.predict(input_df)
+
+    # استخراج القيمة من المصفوفة إذا كانت تحتوي على عنصر واحد
+    prediction_value = prediction_[0]
+
+    # تنسيق الرقم إلى 5 خانات عشرية
+    formatted_prediction = "{:.5f}".format(prediction_value)
+    print(textArt)
+    print(f'# Prediction: {formatted_prediction}')
+
+    # إعداد معلومات الصفقة
+    lot_size = 0.1  # حجم العقد
+    X = float(formatted_prediction)  # مستوى السعر الذي ستقارن به
+    S = 10  # نقاط وقف الخسارة وهدف الربح (10 نقاط)
+
+    # الحصول على سعر السوق الحالي
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None:
+        print(Back.RED +f"[!] Symbol {symbol} is unavailable"+ Back.RESET)
+        return
+
+    # التأكد من أن السوق جاهز للتداول
+    if not symbol_info.visible:
+        print(f"الرمز {symbol} غير مرئي، سيتم فتحه...")
+        mt5.symbol_select(symbol, True)
+
+    # الحصول على أسعار السوق الحالية
+    tick_info = mt5.symbol_info_tick(symbol)
+    if tick_info is None:
+        print(Back.RED +f"[!] Failed to get prices for [{symbol}] symbol."+ Back.RESET)
+        return
+
+    ask_price = tick_info.ask  # سعر الشراء
+    bid_price = tick_info.bid  # سعر البيع
+
+    # تحديد نوع الصفقة بناءً على الشروط
+    if ask_price < X:
+        order_type = mt5.ORDER_TYPE_BUY
+        order_price = ask_price
+        print(f"# Buy order at {order_price:.5f}")
+        print(f"# Spread is {ask_price - bid_price:.5f}")
+    else:
+        order_type = mt5.ORDER_TYPE_SELL
+        order_price = bid_price  # سعر البيع
+        print(f"# Sell order at {order_price:.5f}")
+        print(f"# Spread is {ask_price - bid_price:.5f}")
+
+    # إعداد مستويات وقف الخسارة وهدف الربح بحيث تكون متساوية
+    point = mt5.symbol_info(symbol).point
+    if order_type == mt5.ORDER_TYPE_BUY:
+        sl = order_price - S * point  # وقف الخسارة
+        tp = order_price + S * point  # هدف الربح
+    else:
+        sl = order_price + S * point  # وقف الخسارة
+        tp = order_price - S * point  # هدف الربح
+    
+    # تحقق من أن هدف الربح أكبر من أو يساوي 40 نقطة
+    if abs(tp - order_price) < 40 * point:
+        print(Back.RED +"\n[!] Profit target is less than 4 points, the trade will not be opened."+ Back.RESET)
+        return
+
+    # تنسيق وقف الخسارة وهدف الربح إلى 5 خانات عشرية
+    sl = float("{:.5f}".format(sl))
+    tp = float("{:.5f}".format(tp))
+
+    # إعداد الطلب وفتح الصفقة
+    order_request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": lot_size,
+        "type": order_type,
+        "price": order_price,  # تأكد من تحديد السعر الصحيح
+        "sl": sl,
+        "tp": tp,
+        "deviation": 30,
+        "magic": 234000,
+        "comment": "Python script open",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+
+    # تنفيذ الصفقة
+    result = mt5.order_send(order_request)
+
+    # التحقق من نتيجة الطلب
+    if result is None:
+        print("فشل في إرسال الطلب")
+        print(Back.RED +f"[!] last error: {mt5.last_error()}"+ Back.RESET)
+        return
+
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        print(Back.RED +f"[!] can't open order, error is: {result.retcode}"+ Back.RESET)    
+        # طباعة معلومات إضافية حول الخطأ
+        print(Back.RED +f"[!] more error details: {result}"+ Back.RESET)
+
+    else:
+        print("# The order has been opened successfully.")
+
+# عرض نص فني
+textArt = pf.figlet_format("F-14 >>>>>\nPOWER OF AI")
+print(textArt)
+
+
+# تحميل النموذج المدرب
+model = lgb.Booster(model_file=r'C:\Users\Access\Downloads\lightgbm_model.txt')
+
+# معلومات تسجيل الدخول
+account_number = 51915724  # رقم الحساب
+password = "yqWAA@pt37$V1W"  # كلمة المرور
+server = "ICMarketsSC-Demo"  # اسم الخادم
+
+# تهيئة الاتصال بـ MetaTrader 5
+if not mt5.initialize(login=account_number, password=password, server=server):
+    print(Back.RED +"[!] error in connect to MT5."+ Back.RESET)
+    mt5.shutdown()
+
+# تحديد الرمز الزمني والفترة الزمنية
+symbol = "EURUSD"  # على سبيل المثال
+timeframe = mt5.TIMEFRAME_M1  # دقيقة واحدة
+num_bars = 100  # عدد الشموع المطلوبة لحساب المؤشرات
+
+# تحديد الحد الأقصى للصفقات المفتوحة
+max_trades = 3  # يمكنك تغيير هذا الرقم لتحديد العدد المسموح به من الصفقات المفتوحة في نفس الوقت
+
+# بدء مراقبة الصفقات
+monitor_trades(max_trades)
+
+# التأكد من إغلاق الاتصال بـ MetaTrader 5
+# mt5.shutdown()
